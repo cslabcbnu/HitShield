@@ -1,0 +1,206 @@
+Various attempts were made to improve HitShield since the last commit;
+however, due to the structural characteristics of the folio, no additional
+methods beyond the use of page-flags were identified.
+
+Specifically, the approach of adding a wrapper for logging purposes
+resulted in increased memory consumption, which consequently led to
+a higher number of swap occurrences.
+
+It is acknowledged that the use of idle flags was negative in the previous commit;
+however, we believes that employing idle flags is the most suitable implementation method.
+
+Accordingly, we have configured the Kconfig to establish dependencies,
+allowing selection only in the contexts of multi-gen LRU and 64-bit environments.
+
+If there arise a need to eliminate page-flags in the future,
+we believe adjustments can be made at that time.
+
+As previously described, a significant performance enhancement has been observed,
+and additional testing during kernel builds revealed a 14.1% decrease in pswpin,
+a 9.0% decrease in pswpout, and a 12.2% reduction in runtime.
+(Testing environment: Ubuntu 24.04 LTS, AMD Ryzen 9 5950X 16Core (32Threads), memory limited to 1.5G, make -j 32.)
+
+Since this feature can be selectively utilized by users while enhancing performance,
+it is believed to contribute to the advancement of the Linux kernel.
+
+Currently, the commit lacks detailed documentation on the mechanism of HitShield,
+but we plan to add such documentation in the future.
+
+We request a positive review of this proposal. Thank you.
+
+p.s. "ERROR: Macros with complex values should be enclosed in parentheses" occurs in
+the checkpatch, but we don't think it's critical
+
+Sincerely,
+Minwoo Jo, Heeseung Jo
+---
+ include/linux/mm_inline.h      |  6 ++++++
+ include/linux/page-flags.h     | 27 +++++++++++++++++++++++++++
+ include/trace/events/mmflags.h | 11 +++++++++++
+ mm/Kconfig                     | 10 ++++++++++
+ mm/vmscan.c                    | 24 ++++++++++++++++++++++++
+ 5 files changed, 78 insertions(+)
+
+diff --git a/include/linux/mm_inline.h b/include/linux/mm_inline.h
+index f4fe593c1400..892424f63614 100644
+--- a/include/linux/mm_inline.h
++++ b/include/linux/mm_inline.h
+@@ -266,6 +266,12 @@ static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
+        else
+                list_add(&folio->lru, &lrugen->folios[gen][type][zone]);
+
++#ifdef CONFIG_LRU_GEN_HITSHIELD
++       /* This for initialize hit_shield by 0 when folio add to gen */
++       folio_clear_hitshield_0(folio);
++       folio_clear_hitshield_1(folio);
++#endif
++
+        return true;
+ }
+
+diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
+index 1b3a76710487..737cecdc3ac0 100644
+--- a/include/linux/page-flags.h
++++ b/include/linux/page-flags.h
+@@ -125,6 +125,15 @@ enum pageflags {
+ #endif
+ #ifdef CONFIG_ARCH_USES_PG_ARCH_3
+        PG_arch_3,
++#endif
++#ifdef CONFIG_LRU_GEN_HITSHIELD
++       /*
++        * The flags consist of two types: one for counting the update occurrences
++        * of the folio and another boolean flag to check whether the HitShield is activated.
++        */
++       PG_hitshield_0,
++       PG_hitshield_1,
++       PG_hitshield,
+ #endif
+        __NR_PAGEFLAGS,
+
+@@ -439,6 +448,14 @@ FOLIO_TEST_CLEAR_FLAG(lname, FOLIO_##policy)                               \
+ static __always_inline int TestClearPage##uname(struct page *page)     \
+ { return test_and_clear_bit(PG_##lname, &policy(page, 1)->flags); }
+
++/* This macro function allows the use of the change operation defined in bitops. */
++#define TESTCHANGEPAGEFLAG(uname, lname, policy)                                               \
++static __always_inline                                                                                                 \
++bool folio_test_change_##lname(struct folio *folio)                                            \
++{ return test_and_change_bit(PG_##lname, folio_flags(folio, FOLIO_##policy)); }        \
++static __always_inline int TestChangePage##uname(struct page *page)    \
++{ return test_and_change_bit(PG_##lname, &policy(page, 0)->flags); }
++
+ #define PAGEFLAG(uname, lname, policy)                                 \
+        TESTPAGEFLAG(uname, lname, policy)                              \
+        SETPAGEFLAG(uname, lname, policy)                               \
+@@ -602,6 +619,16 @@ FOLIO_FLAG_FALSE(mlocked)
+        FOLIO_TEST_SET_FLAG_FALSE(mlocked)
+ #endif
+
++#ifdef CONFIG_LRU_GEN_HITSHIELD
++/*
++ * hitshield_0 and 1 use only clear and test_change functions, also
++ * hitshield flag uses only set, test, test_clear function
++ */
++PAGEFLAG(Hitshield0, hitshield_0, PF_HEAD) TESTCHANGEPAGEFLAG(Hitshield0, hitshield_0, PF_HEAD)
++PAGEFLAG(Hitshield1, hitshield_1, PF_HEAD) TESTCHANGEPAGEFLAG(Hitshield1, hitshield_1, PF_HEAD)
++PAGEFLAG(Hitshield, hitshield, PF_HEAD) TESTSCFLAG(Hitshield, hitshield, PF_HEAD)
++#endif
++
+ #ifdef CONFIG_MEMORY_FAILURE
+ PAGEFLAG(HWPoison, hwpoison, PF_ANY)
+ TESTSCFLAG(HWPoison, hwpoison, PF_ANY)
+diff --git a/include/trace/events/mmflags.h b/include/trace/events/mmflags.h
+index bb8a59c6caa2..88044b859a3a 100644
+--- a/include/trace/events/mmflags.h
++++ b/include/trace/events/mmflags.h
+@@ -97,6 +97,16 @@
+
+ #define DEF_PAGEFLAG_NAME(_name) { 1UL <<  PG_##_name, __stringify(_name) }
+
++#ifdef CONFIG_LRU_GEN_HITSHIELD
++#define DEF_PAGEFLAG_HITSHIELD                                 \
++       ,                                                                                       \
++       DEF_PAGEFLAG_NAME(hitshield_0),                         \
++       DEF_PAGEFLAG_NAME(hitshield_1),                         \
++       DEF_PAGEFLAG_NAME(hitshield)                            \
++#else
++#define DEF_PAGEFLAG_HITSHIELD
++#endif
++
+ #define __def_pageflag_names                                           \
+        DEF_PAGEFLAG_NAME(locked),                                      \
+        DEF_PAGEFLAG_NAME(waiters),                                     \
+@@ -117,6 +127,7 @@
+        DEF_PAGEFLAG_NAME(reclaim),                                     \
+        DEF_PAGEFLAG_NAME(swapbacked),                                  \
+        DEF_PAGEFLAG_NAME(unevictable)                                  \
++       DEF_PAGEFLAG_HITSHIELD                                          \
+ IF_HAVE_PG_MLOCK(mlocked)                                              \
+ IF_HAVE_PG_HWPOISON(hwpoison)                                          \
+ IF_HAVE_PG_IDLE(idle)                                                  \
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 4c9f5ea13271..42c6745ac228 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -1261,6 +1261,16 @@ config LRU_GEN_STATS
+ config LRU_GEN_WALKS_MMU
+        def_bool y
+        depends on LRU_GEN && ARCH_HAS_HW_PTE_YOUNG
++
++config LRU_GEN_HITSHIELD
++       bool "Enable HitShield"
++       depends on LRU_GEN
++       help
++         This option enables HitShield which improve eviction process for multi-gen LRU.
++
++         This option is useful for sequential workloads,
++         but has the potential to increase CPU overhead for random workloads.
++
+ # }
+
+ config ARCH_SUPPORTS_PER_VMA_LOCK
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 749cdc110c74..d456349bbab0 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3151,6 +3151,19 @@ static int folio_update_gen(struct folio *folio, int gen)
+                new_flags |= (gen + 1UL) << LRU_GEN_PGOFF;
+        } while (!try_cmpxchg(&folio->flags, &old_flags, new_flags));
+
++#ifdef CONFIG_LRU_GEN_HITSHIELD
++       /*
++        * This part is core of hit_shield : Has this folio been updated frequently?
++        * I chose 5 as the number of times to grant shield because of MAX_NR_GENS is 4,
++        * so if this folio has been updated for more than a generation's length,
++        * it has additional survivability equal to the generation's length.
++        */
++       if (!folio_test_hitshield(folio))
++               if (folio_test_change_hitshield_0(folio))
++                       if (folio_test_change_hitshield_1(folio))
++                               folio_set_hitshield(folio);
++#endif
++
+        return ((old_flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+ }
+
+@@ -4337,6 +4350,17 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
+                return true;
+        }
+
++#ifdef CONFIG_LRU_GEN_HITSHIELD
++       /* This when hit_shield is enabled init hit_shield again, and
++        * init hit_shield again, and protect this folio like second chance
++        */
++       if (folio_test_clear_hitshield(folio)) {
++               gen = folio_inc_gen(lruvec, folio, true);
++               list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
++               return true;
++       }
++#endif
++
+        return false;
+ }
+
+--
+2.43.0
