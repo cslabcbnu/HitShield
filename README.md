@@ -9,7 +9,7 @@
 *   **HitShield:Enhanced swap eviction scheme for Multi-Generational LRU**
     *   Authors: Minwoo Jo, Binwon Song, Hayong Jeong, Heeseung Jo
     *   Journal/Conference: IEEE Access
-    *   Publication Date: 2025. 4.27.
+    *   Publication Date: 2025. 4.17.
     *   Link to Paper: https://doi.org/10.1109/ACCESS.2025.3558527
 
 ## Installation
